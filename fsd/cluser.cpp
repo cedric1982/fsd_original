@@ -459,8 +459,8 @@ void cluser::doparse(char *s)
 	  case CL_ACC:
 	       dolog(SD_DEBUG,
 			   "ACC received from %s: %s",
-			   callsign,
-			   line);
+			   this->callsign,
+			   command);
 	       execmulticast(array, count, index, 1, 1);
 	       break;
       default            : showerror(ERR_SYNTAX, ""); break;
