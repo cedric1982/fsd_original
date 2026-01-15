@@ -457,7 +457,7 @@ void cluser::doparse(char *s)
       case CL_CQ         : execcq(array, count); break;
       case CL_KILL       : execkill(array, count); break;
 	  case CL_ACC:
-	       dolog(LOG_DEBUG,
+	       dolog(SD_DEBUG,
 			   "ACC received from %s: %s",
 			   callsign,
 			   line);
