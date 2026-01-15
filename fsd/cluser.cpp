@@ -46,6 +46,7 @@ const char *clcmdnames[]=
    "$CR",
    "$!!",
    "#DL",
+   "ACC",
    NULL
 };
 
@@ -455,6 +456,7 @@ void cluser::doparse(char *s)
       case CL_CR         : execmulticast(array, count, index, 2, 0); break;
       case CL_CQ         : execcq(array, count); break;
       case CL_KILL       : execkill(array, count); break;
+	  case CL_ACC        : execmulticast(array, count, index, 1, 1); break;
       default            : showerror(ERR_SYNTAX, ""); break;
    }
 }
