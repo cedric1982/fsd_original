@@ -209,6 +209,7 @@ int clinterface::calcrange(client *from, client *to, int type, int range)
          if (from->type==CLIENT_PILOT) return x+y;
          return x>y?x:y;
       case CL_MESSAGE:
+	   case CL_ACC:
          x=to->getrange(), y=from->getrange();
          if (from->type==CLIENT_PILOT&&to->type==CLIENT_PILOT) return x+y;
          return x>y?x:y;
