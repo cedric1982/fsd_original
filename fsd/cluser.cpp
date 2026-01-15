@@ -457,12 +457,14 @@ void cluser::doparse(char *s)
       case CL_CQ         : execcq(array, count); break;
       case CL_KILL       : execkill(array, count); break;
 	  case CL_ACC:
-	       dolog(SD_DEBUG,
-			   "ACC received from %s: %s",
-			   this->callsign,
-			   command);
-	       execmulticast(array, count, index, 1, 1);
-	       break;
+			{
+    			char logbuf[256];
+    			snprintf(logbuf, sizeof(logbuf), "ACC received from %s", thisclient ? thisclient->callsign : "unknown");
+    			dolog(L_INFO, logbuf);
+
+    			execmulticast(array, count, index, 1, 1);
+    			break;
+			}
       default            : showerror(ERR_SYNTAX, ""); break;
    }
 }
