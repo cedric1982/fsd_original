@@ -116,7 +116,12 @@ int client::getrange()
    if (type==CLIENT_PILOT)
    { 
       if (altitude<0) altitude=0;
-      return (int) (10+1.414*sqrt((double)altitude));
+      int r=(int) (10+1.414*sqrt((double)altitude));
+	  if (altitude < 2000)
+		  r = (r < 50) ? 50 : r;
+	  else
+		  r = (r < 30) ? 30 : r;
+	  return r;
    }
    switch (facilitytype)
    {
