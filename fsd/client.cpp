@@ -1,177 +1,938 @@
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
+#include <string>
+
 #ifndef WIN32
-	#include <unistd.h>
+    #include <unistd.h>
+    #include <strings.h>
 #endif
+
+#include <cctype>
 #include <cstring>
-#include <cmath>
 
-#include "client.h"
-#include "cluser.h"
-#include "fsd.h"
-#include "support.h"
 #include "global.h"
+#include "cluser.h"
+#include "support.h"
+#include "server.h"
+#include "fsd.h"
+#include "protocol.h"
+#include "mm.h"
+#include "fsdpaths.h"
 
-client *rootclient=NULL;
+// ---------------------------------------------------------------------------
+// Swift config helper
+// ---------------------------------------------------------------------------
+static int swift_cfg_int(const char* key, int defval)
+{
+    if (!configman) return defval;
+    configgroup* g = configman->getgroup((char*)"swift");
+    if (!g) return defval;
+    configentry* e = g->getentry((char*)key);
+    if (!e) return defval;
+    return e->getint();
+}
 
-client::client(char *i, server *where, char *cs, int t, int reqrating,
-   char *rev, char *real, int st)
+/* The client communication command names */
+const char *clcmdnames[]=
 {
-   next=rootclient, prev=NULL;
-   if (next) next->prev=this;
-   rootclient=this;
-   location=where, cid=strdup(i), type=t, callsign=strdup(cs);
-   protocol=strdup(rev), sector=NULL, identflag=NULL, facilitytype=0;
-   rating=reqrating, visualrange=40;
-   plan=NULL, positionok=0, altitude=0, simtype=st;
-   realname=strdup(real), starttime=alive=mtime();
-   frequency=0; transponder=0; groundspeed=0; lat=0; lon=0;
-   has_cq = 0;
-   cq_ts = 0;
-   last_cq[0] = '\0';
-   gear_known = 0;
-   gear_down_last = 0;
-   gear_last_change = 0;
-   ground_known = 0;
-   on_ground_last = 0;
-   ground_last_change = 0;
-}
-client::~client()
-{
-   serverinterface->clientdropped(this);
-   if (next) next->prev=prev;
-   if (prev) prev->next=next; else rootclient=next;
-   free(cid);
-   free(callsign);
-   if (plan) delete plan;
-   if (realname) free(realname);
-   if (protocol) free(protocol);
-   if (sector) free(sector);
-   if (identflag) free(identflag);
-}
-void client::handlefp(char **array)
-{
-   int revision=plan?plan->revision+1:0;
-   if (plan) delete plan;
-   plan=new flightplan(callsign, *array[0], array[1],
-      atoi(array[2]), array[3], atoi(array[4]),
-      atoi(array[5]), array[6], array[7], atoi(array[8]),
-      atoi(array[9]), atoi(array[10]), atoi(array[11]), array[12],
-      array[13], array[14]);
-   plan->revision=revision;
-}
-/* Update the client fields, given a packet array */
-void client::updatepilot(char **array)
-{
-   unsigned a,b,c;
-   unsigned x,y,z;
-   transponder=atoi(array[2]);
-   if (identflag) free(identflag);
-   identflag=strdup(array[0]);
-   sscanf(array[4],"%lf",&lat);
-   sscanf(array[5],"%lf",&lon);
-if (lat>90.0||lat<-90.0||lon>180.0||lon<-180.0) dolog(L_DEBUG, "POSERR: s=(%s,%s) got(%f,%f)", array[4], array[5], lat, lon);
+   "#AA",
+   "#DA",
+   "#AP",
+   "#DP",
+   "$HO",
+   "#TM",
+   "#RW",
+   "@",
+   "%",
+   "$PI",
+   "$PO",
+   "$HA",
+   "$FP",
+   "#SB",
+   "#PC",
+   "#WX",
+   "#CD",
+   "#WD",
+   "#TD",
+   "$C?",
+   "$CI",
+   "$AX",
+   "$AR",
+   "$ER",
+   "$CQ",
+   "$CR",
+   "$!!",
+   "#DL",
+   NULL
+};
 
-   altitude=atoi(array[6]);
-//if (altitude > 100000 || altitude < 0)
-//	altitude=0;
-   groundspeed=atoi(array[7]);
-   pbh=(unsigned int)strtoul(array[8],(char **)NULL,10);
-
-//x=(pbh&4290772992)>>22;
-//y=(pbh&4190208)>>12;
-//z=(pbh&4092)>>2;
-//dolog(L_INFO,"PBH value in text is %s", array[8]);
-//dolog(L_INFO,"PBH unsigned value is %u",pbh);
-//dolog(L_INFO,"P=%u B=%u H=%u",x,y,z);
-
-   flags=atoi(array[9]);
-   setalive();
-   positionok=1;
-}
-void client::updateatc(char **array)
+const char *errstr[]=
 {
-   int newfreq=atoi(array[0]);
-   frequency=newfreq;
-   facilitytype=atoi(array[1]);
-   visualrange=atoi(array[2]);
-   sscanf(array[4],"%lf",&lat);
-   sscanf(array[5],"%lf",&lon);
-   altitude=atoi(array[6]);
-   setalive();
-   positionok=1;
+   "No error",
+   "Callsign in use",
+   "Invalid callsign",
+   "Already registerd",
+   "Syntax error",
+   "Invalid source callsign",
+   "Invalid CID/password",
+   "No such callsign",
+   "No flightplan",
+   "No such weather profile",
+   "Invalid protocol revision",
+   "Requested level too high",
+   "Too many clients connected",
+   "CID/PID was suspended"
+};
+
+/* The client user */
+cluser::cluser(int fd, clinterface *p, char *pn, int portnum, int gg):
+   absuser(fd,p,pn,portnum, gg)
+{
+   parent=p;
+   thisclient=NULL;
+   configgroup *gu=configman->getgroup("system");
+   configentry *e=gu?gu->getentry("maxclients"):(configentry*)NULL;
+   int total=manager->getvar(p->varcurrent)->value.number;
+   if (e&&atoi(e->getdata())<=total)
+   {
+      showerror(ERR_SERVFULL, (char*)"");
+      kill(KILL_COMMAND);
+   }
 }
-client *getclient(char *ident)
+
+cluser::~cluser()
+{
+   if (thisclient) 
+   {
+      serverinterface->sendrmclient(NULL,(char*)"*",thisclient, this);
+      delete thisclient;
+   }
+}
+
+void cluser::readmotd()
+{
+   FILE *io=fopen(PATH_FSD_MOTD,"r");
+   char line[1000];
+   sprintf(line, "%s", PRODUCT);
+   clientinterface->sendgeneric(thisclient->callsign, thisclient, NULL,
+      NULL, (char*)"server", line, CL_MESSAGE);
+
+   if (!io) return;
+   while (fgets(line,1000,io))
+   {
+      line[strlen(line)-1]='\0';
+      clientinterface->sendgeneric(thisclient->callsign, thisclient, NULL,
+         NULL, (char*)"server", line, CL_MESSAGE);
+   }
+   fclose(io);
+}
+
+void cluser::parse(char *s)
+{
+   setactive();
+   doparse(s);
+}
+
+/* Checks if the given callsign is OK. returns 0 on success or errorcode on failure */
+int cluser::callsignok(char *name)
 {
    client *temp;
+   if (strlen(name)<2||strlen(name)>CALLSIGNBYTES) return ERR_CSINVALID;
+   if (strpbrk(name, (char*)"!@#$%*:& \t")) return ERR_CSINVALID;
    for (temp=rootclient;temp;temp=temp->next)
-      if (!STRCASECMP(ident,temp->callsign))
-      return temp;
-   return NULL;
+      if (!STRCASECMP(temp->callsign,name)) return ERR_CSINUSE;
+   return ERR_OK;
 }
-void client::setalive()
+
+int cluser::checksource(char *from)
 {
-   alive=mtime();
-}
-double client::distance(client *other)
-{
-   if (!other) return -1;
-   if (!positionok||!other->positionok) return -1;
-   return dist(lat,lon,other->lat,other->lon);
+   if (STRCASECMP(from,thisclient->callsign))
+   {
+      showerror(ERR_SRCINVALID, from);
+      return 0;
+   }
    return 1;
 }
-int client::getrange()
+
+int cluser::getcomm(char *cmd)
 {
-   if (type==CLIENT_PILOT)
-   { 
-      if (altitude<0) altitude=0;
-      return (int) (10+1.414*sqrt((double)altitude));
-   }
-   switch (facilitytype)
+   int index;
+   for (index=0;clcmdnames[index];index++)
+      if (!strncmp(cmd,clcmdnames[index],strlen(clcmdnames[index])))
+      return index;
+   return -1;
+}
+
+int cluser::showerror(int num, char *env)
+{
+   uprintf("$ERserver:%s:%03d:%s:%s\r\n",thisclient?thisclient->callsign:
+      "unknown",num,env,errstr[num]);
+   return num;
+}
+
+int cluser::checklogin(char *id, char *pwd, int req)
+{
+   if (id[0]=='\0') return -2;
+   int max, ok=maxlevel(id, pwd, &max);
+   if (!ok)
    {
-      case 0: return 40;       /* Unknown */
-      case 1: return 1500;      /* FSS */
-      case 2: return 5;        /* CLR_DEL */
-      case 3: return 5;        /* GROUND */
-      case 4: return 30;       /* TOWER  */
-      case 5: return 100;      /* APP/DEP */
-      case 6: return 400;      /* CENTER */
-      case 7: return 1500;     /* MONITOR */
-      default: return 40;
+      showerror(ERR_CIDINVALID, id);
+      return -1;
+   }
+   return req>max?max:req;
+}
+
+void cluser::execaa(char **s, int count)
+{
+   if (thisclient)
+   {
+      showerror(ERR_REGISTERED, (char*)"");
+      return;
+   }
+   if (count<7)
+   {
+      showerror(ERR_SYNTAX, (char*)"");
+      return;
+   }
+   int err=callsignok(s[0]);
+   if (err)
+   {
+      showerror(err, (char*)"");
+      kill(KILL_COMMAND);
+      return;
+   }
+   if (atoi(s[6])!=NEEDREVISION)
+   {
+      showerror(ERR_REVISION, (char*)"");
+      kill(KILL_PROTOCOL);
+      return;
+   }
+   int req=atoi(s[5]);
+   if (req<0) req=0;
+   int level=checklogin(s[3], s[4], req);
+   if (level==0)
+   {
+      showerror(ERR_CSSUSPEND, (char*)"");
+      kill(KILL_COMMAND);
+      return;
+   }
+   else if (level==-1)
+   {
+      kill(KILL_COMMAND);
+      return;
+   }
+   else if (level==-2) level=1;
+   if (level<req)
+   {
+      showerror(ERR_LEVEL, s[5]);
+      kill(KILL_COMMAND);
+      return;
+   }
+   thisclient=new client(s[3], myserver, s[0], CLIENT_ATC, level, s[6], s[2], -1);
+   serverinterface->sendaddclient((char*)"*",thisclient, NULL, this, 0);
+   readmotd();
+}
+
+void cluser::execap(char **s, int count)
+{
+   if (thisclient)
+   {
+      showerror(ERR_REGISTERED, (char*)"");
+      return;
+   }
+   if (count<8)
+   {
+      showerror(ERR_SYNTAX, (char*)"");
+      return;
+   }
+   int err=callsignok(s[0]);
+   if (err)
+   {
+      showerror(err, (char*)"");
+      kill(KILL_COMMAND);
+      return;
+   }
+   if (atoi(s[5])!=NEEDREVISION)
+   {
+      showerror(ERR_REVISION, (char*)"");
+      kill(KILL_PROTOCOL);
+      return;
+   }
+   int req=atoi(s[4]);
+   if (req<0) req=0;
+   int level=checklogin(s[2], s[3], req);
+   if (level<0)
+   {
+      kill(KILL_COMMAND);
+      return;
+   }
+   else if (level==0)
+   {
+      showerror(ERR_CSSUSPEND, (char*)"");
+      kill(KILL_COMMAND);
+      return;
+   }
+   if (level<req)
+   {
+      showerror(ERR_LEVEL, s[4]);
+      kill(KILL_COMMAND);
+      return;
+   }
+   thisclient=new client(s[2], myserver, s[0], CLIENT_PILOT, level, s[4], s[7], atoi(s[6]));
+   serverinterface->sendaddclient((char*)"*",thisclient, NULL, this, 0);
+   readmotd();
+
+   // Send CQ snapshots of other pilots to this new pilot
+   send_cq_snapshots_to_new_pilot();
+}
+
+void cluser::execmulticast(char **s, int count, int cmd, int nargs, int multiok)
+{
+   nargs+=2;
+   if (count<nargs)
+   {
+      showerror(ERR_SYNTAX, (char*)"");
+      return;
+   }
+   char *from, *to, data[1000]="";
+   catcommand(s+2, count-2, data);
+   from=s[0], to=s[1];
+   if (!checksource(from)) return;
+   serverinterface->sendmulticast(thisclient, to, data, cmd, multiok, this);
+}
+
+void cluser::execd(char **s, int count)
+{
+   if (count==0)
+   {
+      showerror(ERR_SYNTAX, (char*)"");
+      return;
+   }
+   if (!checksource(s[0])) return;
+   kill(KILL_COMMAND);
+}
+
+void cluser::execpilotpos(char **array, int count)
+{
+   if (count<10)
+   { 
+      showerror(ERR_SYNTAX, (char*)"");
+      return;
+   }
+   if (!checksource(array[1])) return;
+   thisclient->updatepilot(array);
+   serverinterface->sendpilotdata(thisclient, this);
+}
+
+void cluser::execatcpos(char **array, int count)
+{
+   if (count<8)
+   { 
+      showerror(ERR_SYNTAX, (char*)"");
+      return;
+   }
+   if (!checksource(array[0])) return;
+   thisclient->updateatc(array+1);
+   serverinterface->sendatcdata(thisclient, this);
+}
+
+void cluser::execfp(char **array, int count)
+{
+   if (count<17)
+   {
+      showerror(ERR_SYNTAX, (char*)"");
+      return;
+   }
+   if (!checksource(array[0])) return;
+   thisclient->handlefp(array+2);
+   serverinterface->sendplan((char*)"*", thisclient, NULL);
+}
+
+void cluser::execweather(char **array, int count)
+{
+   if (count<3)
+   {
+      showerror(ERR_SYNTAX, (char*)"");
+      return;
+   }
+   if (!checksource(array[0])) return;
+   char source[CALLSIGNBYTES+2];
+   sprintf(source, "%%%s", thisclient->callsign);
+   metarmanager->requestmetar(source, array[2], 1, -1);
+}
+
+void cluser::execacars(char **array, int count)
+{
+   if (count<3)
+   {
+      showerror(ERR_SYNTAX, (char*)"");
+      return;
+   }
+   if (!checksource(array[0])) return;
+   if (!STRCASECMP(array[2],(char*)"METAR")&&count>3)
+   {
+      char source[CALLSIGNBYTES+2];
+      sprintf(source, "%%%s", thisclient->callsign);
+      metarmanager->requestmetar(source, array[3], 0, -1);
    }
 }
 
-flightplan::flightplan(char *cs, char itype, char *iaircraft, int
-   itascruise, char *idepairport, int ideptime, int iactdeptime, char *ialt,
-   char *idestairport, int ihrsenroute, int iminenroute, int ihrsfuel, int
-   iminfuel, char *ialtairport, char *iremarks, char *iroute)
+void cluser::execcq(char **array, int count)
 {
-   callsign=strdup(cs);
-   type=itype;
-   aircraft=strdup(iaircraft);
-   tascruise=itascruise;
-   depairport=strdup(idepairport);
-   deptime=ideptime;
-   actdeptime=iactdeptime;
-   alt=strdup(ialt);
-   destairport=strdup(idestairport);
-   hrsenroute=ihrsenroute;
-   minenroute=iminenroute;
-   hrsfuel=ihrsfuel;
-   minfuel=iminfuel;
-   altairport=strdup(ialtairport);
-   remarks=strdup(iremarks);
-   route=strdup(iroute);
+   if (count < 3 )
+   {
+      showerror(ERR_SYNTAX, (char*)"");
+      return;
+   }
+   if (STRCASECMP(array[1], (char*)"server"))
+   { 
+      execmulticast(array, count, CL_CQ, 1, 1);
+      return;
+   }
+   if (!STRCASECMP(strupr(array[2]), (char*)"RN"))
+   {
+      client *cl=getclient(array[1]);
+      if (cl)
+      {
+         char data[1000];
+         sprintf(data, "%s:%s:RN:%s:USER:%d", cl->callsign, thisclient->callsign, cl->realname,cl->rating);
+         clientinterface->sendpacket(thisclient,cl,NULL,CLIENT_ALL,-1,CL_CR,data);
+         return;
+      }
+   }
+   if (!STRCASECMP(array[2], (char*)"fp"))
+   { 
+      client *cl=getclient(array[3]);
+      if (!cl)
+      {
+         showerror(ERR_NOSUCHCS, array[3]);
+         return;
+      }
+      if (!cl->plan)
+      {
+         showerror(ERR_NOFP, (char*)"");
+         return;
+      }
+      clientinterface->sendplan(thisclient, cl, -1);
+      return;
+   }
 }
 
-flightplan::~flightplan()
+// ---------------------------------------------------------------------------
+// CQ logging helpers
+// ---------------------------------------------------------------------------
+static void log_cq_if_enabled(const char* from_callsign, const char* cq_payload_without_prefix)
 {
-   if (callsign) free(callsign);
-   if (aircraft) free(aircraft);
-   if (depairport) free(depairport);
-   if (destairport) free(destairport);
-   if (alt) free(alt);
-   if (altairport) free(altairport);
-   if (remarks) free(remarks);
-   if (route) free(route);
+    if (!configman) return;
+
+    configgroup* g = configman->getgroup((char*)"swift");
+    if (!g) return;
+
+    configentry* e_on = g->getentry((char*)"cq_log");
+    if (!e_on || e_on->getint() == 0) return;
+
+    const char* filename = "cq_log.txt";
+    configentry* e_file = g->getentry((char*)"cq_log_file");
+    if (e_file && e_file->getdata() && e_file->getdata()[0] != '\0')
+        filename = e_file->getdata();
+
+    FILE* f = fopen(filename, "a");
+    if (!f) return;
+
+    time_t now = time(NULL);
+    struct tm tmv;
+#ifdef WIN32
+    tmv = *localtime(&now);
+#else
+    localtime_r(&now, &tmv);
+#endif
+    char ts[32];
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+
+    fprintf(f, "%s FROM=%s CQ=%s\n",
+            ts,
+            (from_callsign?from_callsign:""),
+            (cq_payload_without_prefix?cq_payload_without_prefix:""));
+    fclose(f);
+}
+
+static void log_cq_suppressed_if_enabled(const char* reason,
+                                        const char* from_callsign,
+                                        const char* cq_payload_without_prefix)
+{
+    if (swift_cfg_int("cq_suppressed_log", 0) == 0) return;
+
+    const char* filename = "cq_suppressed.txt";
+    if (configman)
+    {
+        configgroup* g = configman->getgroup((char*)"swift");
+        if (g)
+        {
+            configentry* e_file = g->getentry((char*)"cq_suppressed_log_file");
+            if (e_file && e_file->getdata() && e_file->getdata()[0] != '\0')
+                filename = e_file->getdata();
+        }
+    }
+
+    FILE* f = fopen(filename, "a");
+    if (!f) return;
+
+    time_t now = time(NULL);
+    struct tm tmv;
+#ifndef WIN32
+    localtime_r(&now, &tmv);
+#else
+    tmv = *localtime(&now);
+#endif
+    char ts[32];
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+
+    fprintf(f, "%s REASON=%s FROM=%s CQ=%s\n",
+            ts,
+            (reason ? reason : ""),
+            (from_callsign ? from_callsign : ""),
+            (cq_payload_without_prefix ? cq_payload_without_prefix : ""));
+    fclose(f);
+}
+
+// ---------------------------------------------------------------------------
+// Merge helpers (strip keys from config JSON string)
+// ---------------------------------------------------------------------------
+static const char* find_json_start_after_acc(const char* payload)
+{
+    // payload is: FROM:TO:ACC:{json...}
+    // find the 3rd ':' after FROM and TO and ACC
+    const char* p = payload;
+    int colons = 0;
+    while (*p)
+    {
+        if (*p == ':')
+        {
+            colons++;
+            if (colons == 3) return p + 1; // right after "ACC:"
+        }
+        p++;
+    }
+    return NULL;
+}
+
+static bool strip_config_bool_key(std::string& json_str, const char* key)
+{
+    std::string k = "\"";
+    k += key;
+    k += "\"";
+
+    std::string::size_type pos = json_str.find(k);
+    if (pos == std::string::npos) return false;
+
+    std::string::size_type colon = json_str.find(':', pos + k.size());
+    if (colon == std::string::npos) return false;
+
+    std::string::size_type val_start = colon + 1;
+    while (val_start < json_str.size() && (json_str[val_start] == ' ' || json_str[val_start] == '\t')) val_start++;
+
+    bool is_true = json_str.compare(val_start, 4, "true") == 0;
+    bool is_false = json_str.compare(val_start, 5, "false") == 0;
+    if (!is_true && !is_false) return false;
+
+    std::string::size_type val_end = val_start + (is_true ? 4 : 5);
+
+    std::string::size_type erase_start = pos;
+    std::string::size_type erase_end = val_end;
+
+    while (erase_end < json_str.size() && (json_str[erase_end] == ' ' || json_str[erase_end] == '\t')) erase_end++;
+
+    // trailing comma
+    if (erase_end < json_str.size() && json_str[erase_end] == ',')
+    {
+        erase_end++;
+        while (erase_end < json_str.size() && (json_str[erase_end] == ' ' || json_str[erase_end] == '\t')) erase_end++;
+        json_str.erase(erase_start, erase_end - erase_start);
+        return true;
+    }
+
+    // leading comma
+    std::string::size_type lead = erase_start;
+    while (lead > 0 && (json_str[lead - 1] == ' ' || json_str[lead - 1] == '\t')) lead--;
+
+    if (lead > 0 && json_str[lead - 1] == ',')
+    {
+        std::string::size_type comma_pos = lead - 1;
+        std::string::size_type back = comma_pos;
+        while (back > 0 && (json_str[back - 1] == ' ' || json_str[back - 1] == '\t')) back--;
+        json_str.erase(back, erase_end - back);
+        return true;
+    }
+
+    // fallback
+    json_str.erase(erase_start, erase_end - erase_start);
+    return true;
+}
+
+static bool config_object_is_empty(const std::string& json_str)
+{
+    std::string::size_type cpos = json_str.find("\"config\"");
+    if (cpos == std::string::npos) return false;
+
+    std::string::size_type brace = json_str.find('{', cpos);
+    if (brace == std::string::npos) return false;
+
+    int depth = 0;
+    for (std::string::size_type i = brace; i < json_str.size(); i++)
+    {
+        if (json_str[i] == '{') depth++;
+        else if (json_str[i] == '}')
+        {
+            depth--;
+            if (depth == 0)
+            {
+                for (std::string::size_type j = brace + 1; j < i; j++)
+                {
+                    char ch = json_str[j];
+                    if (!(ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'))
+                        return false; // not empty
+                }
+                return true; // empty
+            }
+        }
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Swift raw CQ handler with debounce + landing protect + merge
+// ---------------------------------------------------------------------------
+void cluser::execcq_swift_raw(const char *raw_after_prefix)
+{
+    if (!raw_after_prefix || !*raw_after_prefix)
+    {
+        showerror(ERR_SYNTAX, (char*)"");
+        return;
+    }
+
+    const char *c1 = strchr(raw_after_prefix, ':');
+    if (!c1)
+    {
+        showerror(ERR_SYNTAX, (char*)"");
+        return;
+    }
+
+    char from[CALLSIGNBYTES + 1];
+    size_t fromlen = (size_t)(c1 - raw_after_prefix);
+    if (fromlen > CALLSIGNBYTES) fromlen = CALLSIGNBYTES;
+    memcpy(from, raw_after_prefix, fromlen);
+    from[fromlen] = '\0';
+
+    if (!checksource(from)) return;
+
+    bool strip_gear = false;
+    bool strip_ground = false;
+
+    time_t now = time(NULL);
+
+    int landing_protect = swift_cfg_int("cq_landing_protect", 0);
+    int landing_protect_sec = swift_cfg_int("cq_landing_protect_seconds", 8);
+    if (landing_protect_sec < 0) landing_protect_sec = 0;
+    if (landing_protect_sec > 60) landing_protect_sec = 60;
+
+    // ---------------- on_ground debounce + landing protect ----------------
+    if (swift_cfg_int("cq_ground_debounce", 0) != 0 || landing_protect != 0)
+    {
+        int debounce_sec = swift_cfg_int("cq_ground_debounce_seconds", 2);
+        if (debounce_sec < 0) debounce_sec = 0;
+        if (debounce_sec > 30) debounce_sec = 30;
+
+        const char* og_true  = "\"on_ground\":true";
+        const char* og_false = "\"on_ground\":false";
+
+        int msg_has_ground = 0;
+        int msg_ground_val = 0;
+
+        if (strstr(raw_after_prefix, og_true))       { msg_has_ground = 1; msg_ground_val = 1; }
+        else if (strstr(raw_after_prefix, og_false)) { msg_has_ground = 1; msg_ground_val = 0; }
+
+        if (msg_has_ground)
+        {
+            // snapshot previous stable state before any modifications
+            time_t prev_ground_change = thisclient->ground_last_change;
+            int prev_ground_known = thisclient->ground_known;
+            int prev_on_ground = thisclient->on_ground_last;
+
+            bool suppress_ground = false;
+
+            // Landing-protect: if we are stable "on ground" and we see a brief airborne spike
+            if (landing_protect &&
+                prev_ground_known &&
+                prev_on_ground == 1 &&
+                msg_ground_val == 0 &&
+                (now - prev_ground_change) <= landing_protect_sec)
+            {
+                log_cq_suppressed_if_enabled("landing_protect_on_ground", from, raw_after_prefix);
+                suppress_ground = true;
+            }
+
+            // Debounce: any toggle within window
+            if (!suppress_ground &&
+                swift_cfg_int("cq_ground_debounce", 0) != 0 &&
+                prev_ground_known &&
+                (now - prev_ground_change) <= debounce_sec &&
+                prev_on_ground != msg_ground_val)
+            {
+                log_cq_suppressed_if_enabled("on_ground_debounce", from, raw_after_prefix);
+                suppress_ground = true;
+            }
+
+            if (suppress_ground)
+            {
+                strip_ground = true;
+                // extend window without changing stable state
+                thisclient->ground_last_change = now;
+            }
+            else
+            {
+                // accept stable update
+                if (!thisclient->ground_known || thisclient->on_ground_last != msg_ground_val)
+                {
+                    thisclient->ground_known = 1;
+                    thisclient->on_ground_last = msg_ground_val;
+                    thisclient->ground_last_change = now;
+                }
+            }
+        }
+    }
+
+    // ---------------- gear_down debounce + landing protect ----------------
+    if (swift_cfg_int("cq_gear_debounce", 0) != 0 || landing_protect != 0)
+    {
+        int debounce_sec = swift_cfg_int("cq_gear_debounce_seconds", 2);
+        if (debounce_sec < 0) debounce_sec = 0;
+        if (debounce_sec > 30) debounce_sec = 30;
+
+        const char* gd_true  = "\"gear_down\":true";
+        const char* gd_false = "\"gear_down\":false";
+
+        int msg_has_gear = 0;
+        int msg_gear_val = 0;
+
+        if (strstr(raw_after_prefix, gd_true))       { msg_has_gear = 1; msg_gear_val = 1; }
+        else if (strstr(raw_after_prefix, gd_false)) { msg_has_gear = 1; msg_gear_val = 0; }
+
+        if (msg_has_gear)
+        {
+            time_t prev_gear_change = thisclient->gear_last_change;
+            int prev_gear_known = thisclient->gear_known;
+            int prev_gear_down = thisclient->gear_down_last;
+
+            bool suppress_gear = false;
+
+            // Landing-protect: if we are stable on ground, suppress brief "gear_up" spikes after touchdown
+            if (landing_protect &&
+                thisclient->ground_known &&
+                thisclient->on_ground_last == 1 &&
+                msg_gear_val == 0 &&
+                (now - thisclient->ground_last_change) <= landing_protect_sec)
+            {
+                log_cq_suppressed_if_enabled("landing_protect_gear_down", from, raw_after_prefix);
+                suppress_gear = true;
+            }
+
+            // Debounce: any toggle within window
+            if (!suppress_gear &&
+                swift_cfg_int("cq_gear_debounce", 0) != 0 &&
+                prev_gear_known &&
+                (now - prev_gear_change) <= debounce_sec &&
+                prev_gear_down != msg_gear_val)
+            {
+                log_cq_suppressed_if_enabled("gear_down_debounce", from, raw_after_prefix);
+                suppress_gear = true;
+            }
+
+            if (suppress_gear)
+            {
+                strip_gear = true;
+                thisclient->gear_last_change = now; // extend window without changing stable
+            }
+            else
+            {
+                if (!thisclient->gear_known || thisclient->gear_down_last != msg_gear_val)
+                {
+                    thisclient->gear_known = 1;
+                    thisclient->gear_down_last = msg_gear_val;
+                    thisclient->gear_last_change = now;
+                }
+            }
+        }
+    }
+
+    // ---------------- Merge/Strip instead of drop ----------------
+    const char* payload_to_use = raw_after_prefix;
+    char filtered_payload_buf[8192];
+    filtered_payload_buf[0] = '\0';
+
+    if (strip_gear || strip_ground)
+    {
+        const char* json_start = find_json_start_after_acc(raw_after_prefix);
+        if (json_start)
+        {
+            std::string json_str(json_start);
+
+            bool changed = false;
+            if (strip_gear)   changed |= strip_config_bool_key(json_str, "gear_down");
+            if (strip_ground) changed |= strip_config_bool_key(json_str, "on_ground");
+
+            // If stripping removed everything from config, drop the packet
+            if (changed && config_object_is_empty(json_str))
+            {
+                log_cq_suppressed_if_enabled("merged_to_empty_drop", from, raw_after_prefix);
+                return;
+            }
+
+            if (changed)
+            {
+                size_t prefix_len = (size_t)(json_start - raw_after_prefix);
+                if (prefix_len + json_str.size() + 1 < sizeof(filtered_payload_buf))
+                {
+                    memcpy(filtered_payload_buf, raw_after_prefix, prefix_len);
+                    memcpy(filtered_payload_buf + prefix_len, json_str.c_str(), json_str.size());
+                    filtered_payload_buf[prefix_len + json_str.size()] = '\0';
+                    payload_to_use = filtered_payload_buf;
+                }
+            }
+        }
+    }
+
+    // ---------------- Cache + log + broadcast ----------------
+    thisclient->has_cq = 1;
+    thisclient->cq_ts = now;
+
+    strncpy(thisclient->last_cq, payload_to_use, sizeof(thisclient->last_cq) - 1);
+    thisclient->last_cq[sizeof(thisclient->last_cq) - 1] = '\0';
+
+    log_cq_if_enabled(from, thisclient->last_cq);
+
+    // Broadcast to all pilots
+    clientinterface->sendpacket(NULL, NULL, this, CLIENT_PILOT, -1, CL_CQ, thisclient->last_cq);
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot sending for new pilot
+// ---------------------------------------------------------------------------
+void cluser::send_cq_snapshots_to_new_pilot()
+{
+    if (!thisclient || thisclient->type != CLIENT_PILOT) return;
+
+    for (client *c = rootclient; c; c = c->next)
+    {
+        if (c->type != CLIENT_PILOT) continue;
+        if (!c->has_cq) continue;
+        if (c == thisclient) continue;
+
+        clientinterface->sendpacket(thisclient, NULL, NULL, CLIENT_PILOT, -1, CL_CQ, c->last_cq);
+    }
+}
+
+void cluser::execkill(char ** array, int count)
+{
+   char junk[64];
+   if (count < 3 )
+   {
+     showerror(ERR_SYNTAX, (char*)"");
+     return;
+   }
+   client *cl=getclient(array[1]);
+   if (!cl)
+   {
+     showerror(ERR_NOSUCHCS, array[1]);
+     return;
+   }
+
+   if (thisclient->rating<11)
+   {
+      sprintf(junk, "You are not allowed to kill users!");
+      clientinterface->sendgeneric(thisclient->callsign, thisclient, NULL,
+         NULL, (char*)"server", junk, CL_MESSAGE);
+      sprintf(junk,"%s attempted to remove %s, but was not allowed to",thisclient->callsign,array[1]);
+      dolog(L_ERR,junk);
+   }
+   else
+   {
+      sprintf(junk, "Attempting to kill %s", array[1]);
+      clientinterface->sendgeneric(thisclient->callsign, thisclient, NULL,
+         NULL, (char*)"server", junk, CL_MESSAGE);
+      sprintf(junk,"%s Killed %s",thisclient->callsign,array[1]);
+      dolog(L_INFO,junk);
+      serverinterface->sendkill(cl,array[2]);
+   }
+   return;
+}
+
+void cluser::doparse(char *s)
+{
+   char cmd[4], *array[100];
+
+   char rawline[8192];
+   strncpy(rawline, s, sizeof(rawline)-1);
+   rawline[sizeof(rawline)-1] = '\0';
+
+   snappacket(s, cmd, 3);
+   int index=getcomm(cmd), count;
+   if (index==-1)
+   {
+      showerror(ERR_SYNTAX, (char*)"");
+      return;
+   }
+   if (!thisclient&&index!=CL_ADDATC&&index!=CL_ADDPILOT) return;
+
+   if (index==CL_CQ)
+   {
+       const char *p  = rawline + 3;
+       const char *c1 = strchr(p, ':');
+       const char *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
+
+       int to_is_server = 0;
+       if (c1 && c2)
+       {
+           size_t to_len = (size_t)(c2 - (c1 + 1));
+           if (to_len == 6 && !strncasecmp(c1 + 1, "server", 6))
+               to_is_server = 1;
+       }
+
+       // Not to server => treat as swift raw CQ and forward to all pilots
+       if (!to_is_server)
+       {
+           execcq_swift_raw(rawline + 3);
+           return;
+       }
+   }
+
+   /* Just a hack to put the pointer on the first arg here */
+   s+=strlen(clcmdnames[index]);
+   count=breakpacket(s,array,100);
+
+   switch (index)
+   {
+      case CL_ADDATC     : execaa(array,count);  break;
+      case CL_ADDPILOT   : execap(array,count);  break;
+      case CL_PLAN       : execfp(array,count); break;
+      case CL_RMATC      :
+      case CL_RMPILOT    : execd(array,count); break;
+      case CL_PILOTPOS   : execpilotpos(array,count); break;
+      case CL_ATCPOS     : execatcpos(array,count); break;
+      case CL_PONG       :
+      case CL_PING       : execmulticast(array,count,index,0,1); break;
+      case CL_MESSAGE    : execmulticast(array,count,index,1,1); break; 
+      case CL_REQHANDOFF :
+      case CL_ACHANDOFF  : execmulticast(array,count,index,1,0); break;
+      case CL_SB         :
+      case CL_PC         : execmulticast(array,count,index,0,0); break;
+      case CL_WEATHER    : execweather(array, count); break;
+      case CL_REQCOM     : execmulticast(array,count,index,0,0); break;
+      case CL_REPCOM     : execmulticast(array,count,index,1,0); break;
+      case CL_REQACARS   : execacars(array, count); break;
+      case CL_CR         : execmulticast(array, count, index, 2, 0); break;
+      case CL_CQ         : execcq(array, count); break;
+      case CL_KILL       : execkill(array, count); break;
+      default            : showerror(ERR_SYNTAX, (char*)""); break;
+   }
 }
