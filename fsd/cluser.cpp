@@ -478,7 +478,7 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
 			{
 				return;
 			}
-			if (!thisclient->ground_known || thsiclient->on_ground_last != msg_ground_val)
+			if (!thisclient->ground_known || thisclient->on_ground_last != msg_ground_val)
 			{
 				thisclient->ground_known = 1;
 				thsiclient->on_ground_last = msg_ground_val;
