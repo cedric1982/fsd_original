@@ -451,7 +451,7 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
 
     if (swift_cfg_int("cq_gear_debounce", 0) != 0)
 	{
-		int debounce_sec = swift_cgf_int("cq_gear_debounce_seconds", 2);
+		int debounce_sec = swift_cfg_int("cq_gear_debounce_seconds", 2);
 		if (debounce_sec < 0) debounce_sec = 0;
 		if (debounce_sec > 30) debounce_sec = 30;
 
