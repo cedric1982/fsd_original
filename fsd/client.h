@@ -47,6 +47,9 @@ class client
    int has_cq;
    time_t cq_ts;
    char last_cq[8192];
+   int gear_known;
+   int gear_down_last; // 0/1
+   time_t gear_last_change; //time(NULL)
    server *location;
    client *next, *prev;
    client(char *, server *, char *, int, int, char *, char *, int);
