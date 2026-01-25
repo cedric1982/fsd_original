@@ -386,7 +386,7 @@ void cluser::execcq(char **array, int count)
    }
 }
 
-static_void log_cq_if_enabled(const char* from_callsign, const char* cq_payload_without_prefix)
+static void log_cq_if_enabled(const char* from_callsign, const char* cq_payload_without_prefix)
 {
 	if (!configman) return;
 
@@ -412,7 +412,7 @@ static_void log_cq_if_enabled(const char* from_callsign, const char* cq_payload_
 	localtime_r(&now, &tmv);
 #endif
 	char ts[32];
-	strftime(ts, sizeof(ts), "%Y-%m-%s %H:%M:%S", &tmv);
+	strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
 
 	fprintf(f, "%s FROM=%s CQ=%s\n", ts, (from_callsign?from_callsign:""), (cq_payload_without_prefix?cq_payload_without_prefix:""));
 	fclose(f);
