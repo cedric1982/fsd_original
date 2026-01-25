@@ -444,7 +444,7 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
     strncpy(thisclient->last_cq, raw_after_prefix, sizeof(thisclient->last_cq) - 1);
     thisclient->last_cq[sizeof(thisclient->last_cq) - 1] = '\0';
 
-	log_cq_if_enabled(from, thisclient->last_cq)
+	log_cq_if_enabled(from, thisclient->last_cq);
 	
     clientinterface->sendpacket(NULL, NULL, this, CLIENT_PILOT, -1, CL_CQ, thisclient->last_cq);
 }
