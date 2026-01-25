@@ -430,20 +430,61 @@ static void log_cq_if_enabled(const char* from_callsign, const char* cq_payload_
 	fclose(f);
 }
 
+static void log_cq_suppressed_if_enabled(const char* reason,
+                                        const char* from_callsign,
+                                        const char* cq_payload_without_prefix)
+{
+    if (swift_cfg_int("cq_suppressed_log", 0) == 0) return;
+
+    const char* filename = "cq_suppressed.txt";
+    if (configman)
+    {
+        configgroup* g = configman->getgroup((char*)"swift");
+        if (g)
+        {
+            configentry* e_file = g->getentry((char*)"cq_suppressed_log_file");
+            if (e_file && e_file->getdata() && e_file->getdata()[0] != '\0')
+                filename = e_file->getdata();
+        }
+    }
+
+    FILE* f = fopen(filename, "a");
+    if (!f) return;
+
+    time_t now = time(NULL);
+    struct tm tmv;
+#ifndef WIN32
+    localtime_r(&now, &tmv);
+#else
+    tmv = *localtime(&now);
+#endif
+    char ts[32];
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+
+    fprintf(f, "%s REASON=%s FROM=%s CQ=%s\n",
+            ts,
+            (reason ? reason : ""),
+            (from_callsign ? from_callsign : ""),
+            (cq_payload_without_prefix ? cq_payload_without_prefix : ""));
+    fclose(f);
+}
+
 
 void cluser::execcq_swift_raw(const char *raw_after_prefix)
 {
     if (!raw_after_prefix || !*raw_after_prefix)
     {
-        showerror(ERR_SYNTAX, "");
+        showerror(ERR_SYNTAX, (char*)"");
         return;
-	}
+    }
+
     const char *c1 = strchr(raw_after_prefix, ':');
     if (!c1)
     {
-        showerror(ERR_SYNTAX, "");
+        showerror(ERR_SYNTAX, (char*)"");
         return;
-	}
+    }
+
     char from[CALLSIGNBYTES + 1];
     size_t fromlen = (size_t)(c1 - raw_after_prefix);
     if (fromlen > CALLSIGNBYTES) fromlen = CALLSIGNBYTES;
@@ -452,90 +493,95 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
 
     if (!checksource(from)) return;
 
-{
-	time_t now = time(NULL);
+    time_t now = time(NULL);
 
-	if (swift_cfg_int("cq_ground_debounce", 0) != 0)
-	{
-		int debounce_sec = swift_cfg_int("cq_ground_debounce_seconds", 2);
-		if (debounce_sec < 0) debounce_sec = 0;
-		if (debounce_sec > 30) debounce_sec = 30;
+    // --- on_ground debounce (bidirectional) ---
+    if (swift_cfg_int("cq_ground_debounce", 0) != 0)
+    {
+        int debounce_sec = swift_cfg_int("cq_ground_debounce_seconds", 2);
+        if (debounce_sec < 0) debounce_sec = 0;
+        if (debounce_sec > 30) debounce_sec = 30;
 
-		const char* og_true ="\"on_ground\":true";
-		const char* og_false = "\"on_ground\":false";
+        const char* og_true  = "\"on_ground\":true";
+        const char* og_false = "\"on_ground\":false";
 
-		int msg_has_ground = 0;
-		int msg_ground_val = 0;
+        int msg_has_ground = 0;
+        int msg_ground_val = 0;
 
-		if (strstr(raw_after_prefix, og_true)) { msg_has_ground = 1; msg_ground_val = 1; }
-		else if (strstr(raw_after_prefix, og_false)) { msg_has_ground = 1; msg_ground_val = 0; }
+        if (strstr(raw_after_prefix, og_true)) { msg_has_ground = 1; msg_ground_val = 1; }
+        else if (strstr(raw_after_prefix, og_false)) { msg_has_ground = 1; msg_ground_val = 0; }
 
-		if (msg_has_ground)
-		{
-			if (thisclient->ground_known &&
-				(now - thisclient->ground_last_change) <= debounce_sec &&
-				thisclient->on_ground_last != msg_ground_val)
-			{
-				return;
-			}
-			if (!thisclient->ground_known || thisclient->on_ground_last != msg_ground_val)
-			{
-				thisclient->ground_known = 1;
-				thisclient->on_ground_last = msg_ground_val;
-				thisclient->ground_last_change = now;
-			}
-		}
-	}
-	
+        if (msg_has_ground)
+        {
+            // suppress any toggle within debounce window
+            if (thisclient->ground_known &&
+                (now - thisclient->ground_last_change) <= debounce_sec &&
+                thisclient->on_ground_last != msg_ground_val)
+            {
+                log_cq_suppressed_if_enabled("on_ground_debounce", from, raw_after_prefix);
+                return;
+            }
+
+            // accept update
+            if (!thisclient->ground_known || thisclient->on_ground_last != msg_ground_val)
+            {
+                thisclient->ground_known = 1;
+                thisclient->on_ground_last = msg_ground_val;
+                thisclient->ground_last_change = now;
+            }
+        }
+    }
+
+    // --- gear_down debounce (bidirectional) ---
     if (swift_cfg_int("cq_gear_debounce", 0) != 0)
-	{
-		int debounce_sec = swift_cfg_int("cq_gear_debounce_seconds", 2);
-		if (debounce_sec < 0) debounce_sec = 0;
-		if (debounce_sec > 30) debounce_sec = 30;
+    {
+        int debounce_sec = swift_cfg_int("cq_gear_debounce_seconds", 2);
+        if (debounce_sec < 0) debounce_sec = 0;
+        if (debounce_sec > 30) debounce_sec = 30;
 
-		const char* gd_true = "\"gear_down\":true";
-		const char* gd_false = "\"gear_down\":false";
+        const char* gd_true  = "\"gear_down\":true";
+        const char* gd_false = "\"gear_down\":false";
 
-		int msg_has_gear = 0;
-		int msg_gear_val = 0;
+        int msg_has_gear = 0;
+        int msg_gear_val = 0;
 
-		if (strstr(raw_after_prefix, gd_true))
-		{
-			msg_has_gear = 1;
-			msg_gear_val = 1;
-		}
+        if (strstr(raw_after_prefix, gd_true)) { msg_has_gear = 1; msg_gear_val = 1; }
+        else if (strstr(raw_after_prefix, gd_false)) { msg_has_gear = 1; msg_gear_val = 0; }
 
-		if (msg_has_gear)
-		{
-			time_t now = time(NULL);
+        if (msg_has_gear)
+        {
+            // suppress any toggle within debounce window
+            if (thisclient->gear_known &&
+                (now - thisclient->gear_last_change) <= debounce_sec &&
+                thisclient->gear_down_last != msg_gear_val)
+            {
+                log_cq_suppressed_if_enabled("gear_down_debounce", from, raw_after_prefix);
+                return;
+            }
 
-			if (thisclient->gear_known &&
-				thisclient->gear_down_last == 0 &&
-				msg_gear_val == 1 &&
-				(now - thisclient->gear_last_change) <= debounce_sec)
-			{
-				return;
-			}
-			if (!thisclient->gear_known || thisclient->gear_down_last != msg_gear_val)
-			{
-				thisclient->gear_known = 1;
-				thisclient->gear_down_last = msg_gear_val;
-				thisclient->gear_last_change = now;
-			}
-		}
+            // accept update
+            if (!thisclient->gear_known || thisclient->gear_down_last != msg_gear_val)
+            {
+                thisclient->gear_known = 1;
+                thisclient->gear_down_last = msg_gear_val;
+                thisclient->gear_last_change = now;
+            }
+        }
+    }
 
-	
+    // Cache + normal CQ log
     thisclient->has_cq = 1;
-    thisclient->cq_ts = time(NULL);
+    thisclient->cq_ts = now;
+
     strncpy(thisclient->last_cq, raw_after_prefix, sizeof(thisclient->last_cq) - 1);
     thisclient->last_cq[sizeof(thisclient->last_cq) - 1] = '\0';
 
-	log_cq_if_enabled(from, thisclient->last_cq);
-	
+    log_cq_if_enabled(from, thisclient->last_cq);
+
+    // Broadcast to all pilots
     clientinterface->sendpacket(NULL, NULL, this, CLIENT_PILOT, -1, CL_CQ, thisclient->last_cq);
-	}
 }
-}
+
 void cluser::send_cq_snapshots_to_new_pilot()
 {
     if (!thisclient || thisclient->type != CLIENT_PILOT) return;
