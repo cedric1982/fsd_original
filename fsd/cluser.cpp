@@ -2,6 +2,7 @@
 #include <cstdlib>
 #ifndef WIN32
 	#include <unistd.h>
+    #include <strings.h>
 #endif
 #include <cctype>
 #include <cstring>
@@ -383,6 +384,50 @@ void cluser::execcq(char **array, int count)
    }
 }
 
+void cluser::execcq_swift_raw(const char *raw_after_prefix)
+{
+    if (!raw_after_prefix || !*raw_after_prefix)
+    {
+        showerror(ERR_SYNTAX, "");
+        return;
+	}
+    const char *c1 = strchr(raw_after_prefix, ':');
+    if (!c1)
+    {
+        showerror(ERR_SYNTAX, "");
+        return;
+	}
+    char from[CALLSIGNBYTES + 1];
+    size_t fromlen = (size_t)(c1 - raw_after_prefix);
+    if (fromlen > CALLSIGNBYTES) fromlen = CALLSIGNBYTES;
+    memcpy(from, raw_after_prefix, fromlen);
+    from[fromlen] = '\0';
+
+    if (!checksource(from)) return;
+
+    thisclient->has_cq = 1;
+    thisclient->cq_ts = time(NULL);
+    strncpy(thisclient->last_cq, raw_after_prefix, sizeof(thisclient->last_cq) - 1);
+    thisclient->last_cq[sizeof(thisclient->last_cq) - 1] = '\0';
+
+    clientinterface->sendpacket(NULL, NULL, this, CLIENT_PILOT, -1, CL_CQ, thisclient->last_cq);
+}
+
+void cluser::send_cq_snapshots_to_new_pilot()
+{
+    if (!thisclient || thisclient->type != CLIENT_PILOT) return;
+
+    for (client *c = rootclient; c; c = c->next)
+    {
+        if (c->type !=CLIENT_PILOT) continue;
+        if (!c->has_cq) continue;
+        if (c == thisclient) continue;
+
+        clientinterface->sendpacket(thisclient, NULL, NULL, CLIENT_PILOT, -1, CL_CQ, c->last_cq);
+	}
+}
+
+
 void cluser::execkill(char ** array, int count)
 {
    char junk[64];
@@ -420,6 +465,11 @@ void cluser::execkill(char ** array, int count)
 void cluser::doparse(char *s)
 {
    char cmd[4], *array[100];
+
+   char rawline[8192];
+   strncpy(rawline, s, sizeof(rawline)-1);
+   rawline[sizeof(rawline)-1] = '\0';
+	
    snappacket(s, cmd, 3);
    int index=getcomm(cmd), count;
    if (index==-1)
@@ -428,6 +478,28 @@ void cluser::doparse(char *s)
       return;
    }
    if (!thisclient&&index!=CL_ADDATC&&index!=CL_ADDPILOT) return;
+
+
+   if (index==CL_CQ)
+   {
+	   const char *p  = rawline +3;
+	   const char *c1 = strchr(p, ':');
+	   const char *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
+
+	   int to_is_server = 0;
+	   if (c1 && c2)
+	   {
+		   size_t to_len = (size_t)(c2 - (c1 + 1));
+		   if (to_len == 6 && !strcasecmp(c1 + 1, "server", 6))
+			   to_this_server = 1;
+	   }
+
+	   if (!to_is_server)
+	   {
+		   execcq_swift_raw(rawline + 3);
+		   return;
+	   }
+   }
 
    /* Just a hack to put the pointer on the first arg here */
    s+=strlen(clcmdnames[index]);
