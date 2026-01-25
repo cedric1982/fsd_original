@@ -258,6 +258,7 @@ void cluser::execap(char **s, int count)
       atoi(s[6]));
    serverinterface->sendaddclient("*",thisclient, NULL, this, 0);
    readmotd();
+   send_cq_snapshots_to_new_pilot();
 }
 void cluser::execmulticast(char **s, int count, int cmd, int nargs, int multiok)
 {
