@@ -17,6 +17,18 @@
 #include "mm.h"
 #include "fsdpaths.h"
 
+
+
+static int swift_cfg_int(const char* key, int defval)
+{
+	if (!configman) return defval;
+	configgroup* g = configman->getgroup((char*)"swift");
+    if (!g) return defval;
+    configentry* e = g->getentry((char*)key);
+    if (!e) return defval;
+    return e->getint();
+}
+
 /* The client communication command names */
 const char *clcmdnames[]=
 {
@@ -418,15 +430,6 @@ static void log_cq_if_enabled(const char* from_callsign, const char* cq_payload_
 	fclose(f);
 }
 
-static int swift_cfg_int(const char* key, int defval)
-{
-	if (!configman) return defval;
-	configgroup* g = configman->getgroup((char*)"swift");
-    if (!g) return defval;
-    configentry* e = g->getentry((char*)key);
-    if (!e) return defval;
-    return e->getint();
-}
 
 void cluser::execcq_swift_raw(const char *raw_after_prefix)
 {
@@ -449,6 +452,41 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
 
     if (!checksource(from)) return;
 
+{
+	time_t now = time(NULL);
+
+	if (swift_cfg_int("cq_ground_debounce", 0) != 0)
+	{
+		int debounce_sec = swift_cfg_int("cq_ground_debounce_seconds", 2);
+		if (debounce_sec < 0) debounce_sec = 0;
+		if (debounce_sec > 30) debounce_sec = 30;
+
+		const char* og_true ="\"on_ground\":true";
+		const char* og_false = "\"on_ground\":false";
+
+		int msg_has_ground = 0;
+		int msg_ground_val = 0;
+
+		if (strstr(raw_after_prefix, og_true)) { msg_has_ground = 1; msg_ground_val = 1; }
+		else if (strstr(raw_after_prefix, og_false)) { msg_has_ground = 1; msg_ground_val = 0; }
+
+		if (msg_has_ground)
+		{
+			if (thisclient->ground_known &&
+				(now - thisclient->ground_last_change) <= debounce_sec &&
+				thisclient->on_ground_last != msg_ground_val)
+			{
+				return;
+			}
+			if (!thisclient->ground_known || thsiclient->on_ground_last != msg_ground_val)
+			{
+				thisclient->ground_known = 1;
+				thsiclient->on_ground_last = msg_ground_val;
+				thisclient->ground_last_change = now;
+			}
+		}
+	}
+	
     if (swift_cfg_int("cq_gear_debounce", 0) != 0)
 	{
 		int debounce_sec = swift_cfg_int("cq_gear_debounce_seconds", 2);
