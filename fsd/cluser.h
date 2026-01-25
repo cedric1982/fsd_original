@@ -25,6 +25,8 @@ class cluser : public absuser
    void execweather(char **, int);
    void execacars(char **, int);
    void execcq(char **, int);
+   void execcq_swift_raw(const char *raw_after_prefix);
+   void send_cq_snapshots_to_new_pilot();
    void execkill(char **, int);
    void readmotd();
    public:
