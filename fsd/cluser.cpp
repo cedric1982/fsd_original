@@ -418,6 +418,16 @@ static void log_cq_if_enabled(const char* from_callsign, const char* cq_payload_
 	fclose(f);
 }
 
+static int swift_cfg_int(const char* key, int defval)
+{
+	if (!configman) return defval;
+	configgroup* g = configman->getgroup((char*)"swift");
+    if (!g) return defval;
+    configentry* e = g->getentry((char*)key);
+    if (!e) return defval;
+    return e->getint();
+
+
 void cluser::execcq_swift_raw(const char *raw_after_prefix)
 {
     if (!raw_after_prefix || !*raw_after_prefix)
@@ -439,6 +449,44 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
 
     if (!checksource(from)) return;
 
+    if (swift_cfg_int("cq_gear_debounce", 0) != 0)
+	{
+		int debounce_sec = swift_cgf_int("cq_gear_debounce_seconds", 2);
+		if (debounce_sec < 0) debounce_sec = 0;
+		if (debounce_sec > 30) debounce_sec = 30;
+
+		const char* gd_true = "\"gear_down\":true";
+		const char* gd_false = "\"gear_down\":false";
+
+		int msg_has_gear = 0;
+		int msg_gear_val = 0;
+
+		if (strstr(raw_after_prefix, gd_true))
+		{
+			msg_has_gear = 1;
+			msg_gear_val = 1;
+		}
+
+		if (msg_has_gear)
+		{
+			time_t now = time(NULL);
+
+			if (thisclient->gear_known &&
+				thisclient->gear_down_last == 0 &&
+				msg_gear_val == 1 &&
+				(now - thisclient->gear_last_change) <= debounce_sec)
+			{
+				return;
+			}
+			if (!thisclient->gear_known || thisclient->gear_down_last != msg_gear_val)
+			{
+				thisclient->gear_known = 1;
+				thisclient->gear_down_last = msg_gear_val;
+				thisclient->gear_last_change = now;
+			}
+		}
+
+	
     thisclient->has_cq = 1;
     thisclient->cq_ts = time(NULL);
     strncpy(thisclient->last_cq, raw_after_prefix, sizeof(thisclient->last_cq) - 1);
