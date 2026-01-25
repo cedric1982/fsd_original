@@ -1,6 +1,7 @@
-#include <cstdio>
+das hier ist meine cluser.cpp ist das alles richtig oder habe ich was vergessen? #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <string>
 #ifndef WIN32
 	#include <unistd.h>
     #include <strings.h>
@@ -469,6 +470,122 @@ static void log_cq_suppressed_if_enabled(const char* reason,
     fclose(f);
 }
 
+static const char* find_json_start_after_acc(const char* payload)
+{
+    // payload is: FROM:TO:ACC:{json...}
+    // find the 3rd ':' after FROM and TO and ACC
+    const char* p = payload;
+    int colons = 0;
+    while (*p)
+    {
+        if (*p == ':')
+        {
+            colons++;
+            if (colons == 3) return p + 1; // position right after "ACC:"
+        }
+        p++;
+    }
+    return NULL;
+}
+
+
+static bool strip_config_bool_key(std::string& json, const char* key)
+{
+    // We try to remove occurrences of: "key":true OR "key":false
+    // inside the "config":{...} object.
+    std::string k = "\"";
+    k += key;
+    k += "\"";
+
+    size_t pos = json.find(k);
+    if (pos == std::string::npos) return false;
+
+    // Find ':' after key
+    size_t colon = json.find(':', pos + k.size());
+    if (colon == std::string::npos) return false;
+
+    // Find end of value (expects true/false)
+    size_t val_start = colon + 1;
+    while (val_start < json.size() && (json[val_start] == ' ' || json[val_start] == '\t')) val_start++;
+
+    bool is_true = json.compare(val_start, 4, "true") == 0;
+    bool is_false = json.compare(val_start, 5, "false") == 0;
+    if (!is_true && !is_false) return false;
+
+    size_t val_end = val_start + (is_true ? 4 : 5);
+
+    // Expand removal range to include surrounding comma correctly
+    // Case A: ..., "key":true, ...
+    // Case B: "key":true, ...
+    // Case C: ..., "key":true
+    size_t erase_start = pos;
+    size_t erase_end = val_end;
+
+    // include trailing spaces
+    while (erase_end < json.size() && (json[erase_end] == ' ' || json[erase_end] == '\t')) erase_end++;
+
+    // If there's a trailing comma, remove it
+    if (erase_end < json.size() && json[erase_end] == ',')
+    {
+        erase_end++; // remove comma
+        while (erase_end < json.size() && (json[erase_end] == ' ' || json[erase_end] == '\t')) erase_end++;
+        json.erase(erase_start, erase_end - erase_start);
+        return true;
+    }
+
+    // Otherwise try to remove a leading comma (", " before the key)
+    size_t lead = erase_start;
+    while (lead > 0 && (json[lead - 1] == ' ' || json[lead - 1] == '\t')) lead--;
+
+    if (lead > 0 && json[lead - 1] == ',')
+    {
+        size_t comma_pos = lead - 1;
+        // also remove spaces before comma if any
+        size_t back = comma_pos;
+        while (back > 0 && (json[back - 1] == ' ' || json[back - 1] == '\t')) back--;
+        json.erase(back, erase_end - back);
+        return true;
+    }
+
+    // Fallback: remove just the key:value segment
+    json.erase(erase_start, erase_end - erase_start);
+    return true;
+}
+
+
+static bool config_object_is_empty(const std::string& json)
+{
+    // crude but effective: look for "config":{ ... }
+    size_t cpos = json.find("\"config\"");
+    if (cpos == std::string::npos) return false;
+
+    size_t brace = json.find('{', cpos);
+    if (brace == std::string::npos) return false;
+
+    // find matching '}' for the config object (simple depth count)
+    int depth = 0;
+    for (size_t i = brace; i < json.size(); i++)
+    {
+        if (json[i] == '{') depth++;
+        else if (json[i] == '}')
+        {
+            depth--;
+            if (depth == 0)
+            {
+                // check if between brace and i only whitespace/newlines
+                for (size_t j = brace + 1; j < i; j++)
+                {
+                    char ch = json[j];
+                    if (!(ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'))
+                        return false; // not empty
+                }
+                return true; // empty
+            }
+        }
+    }
+    return false;
+}
+
 
 void cluser::execcq_swift_raw(const char *raw_after_prefix)
 {
@@ -493,8 +610,17 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
 
     if (!checksource(from)) return;
 
+	bool strip_gear = false;
+	bool strip_ground = false;
+	
     time_t now = time(NULL);
 
+    int landing_protect = swift_cfg_int("cq_landing_protect", 0);
+    int landing_protect_sec = swift_cfg_int("cq_landing_protect_seconds", 8);
+    if (landing_protect_sec < 0) landing_protect_sec = 0;
+    if (landing_protect_sec > 60) landing_protect_sec = 60;
+
+	
     // --- on_ground debounce (bidirectional) ---
     if (swift_cfg_int("cq_ground_debounce", 0) != 0)
     {
@@ -519,7 +645,8 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
                 thisclient->on_ground_last != msg_ground_val)
             {
                 log_cq_suppressed_if_enabled("on_ground_debounce", from, raw_after_prefix);
-                return;
+                strip_ground = true;
+				thisclient->ground_last_change = now;
             }
 
             // accept update
@@ -529,6 +656,18 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
                 thisclient->on_ground_last = msg_ground_val;
                 thisclient->ground_last_change = now;
             }
+			if (landing_protect &&
+    			thisclient->ground_known &&
+    			thisclient->on_ground_last == 1 &&
+    			msg_ground_val == 0 &&
+    			(now - thisclient->ground_last_change) <= landing_protect_sec)
+			{
+			    log_cq_suppressed_if_enabled("landing_protect_on_ground", from, raw_after_prefix);
+			    strip_ground = true;
+			    thisclient->ground_last_change = now;
+			}
+
+			
         }
     }
 
@@ -556,7 +695,8 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
                 thisclient->gear_down_last != msg_gear_val)
             {
                 log_cq_suppressed_if_enabled("gear_down_debounce", from, raw_after_prefix);
-                return;
+				strip_gear = true;
+				thisclient->gear_last_change = now;
             }
 
             // accept update
@@ -566,14 +706,63 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
                 thisclient->gear_down_last = msg_gear_val;
                 thisclient->gear_last_change = now;
             }
+
+			if (landing_protect &&
+			    thisclient->ground_known &&
+			    thisclient->on_ground_last == 1 &&
+			    msg_gear_val == 0 &&
+			    (now - thisclient->ground_last_change) <= landing_protect_sec)
+			{
+			    log_cq_suppressed_if_enabled("landing_protect_gear_down", from, raw_after_prefix);
+			    strip_gear = true;
+			    thisclient->gear_last_change = now;
+			}
+
         }
     }
 
+	const char* payload_to_use = raw_after_prefix;
+char filtered_payload_buf[8192];
+filtered_payload_buf[0] = '\0';
+
+if (strip_gear || strip_ground)
+{
+    const char* json_start = find_json_start_after_acc(raw_after_prefix);
+    if (json_start)
+    {
+        std::string json(json_start);
+
+        bool changed = false;
+        if (strip_gear)   changed |= strip_config_bool_key(json, "gear_down");
+        if (strip_ground) changed |= strip_config_bool_key(json, "on_ground");
+
+        if (changed && config_object_is_empty(json))
+        {
+            log_cq_suppressed_if_enabled("merged_to_empty_drop", from, raw_after_prefix);
+            return;
+        }
+
+        if (changed)
+        {
+            size_t prefix_len = (size_t)(json_start - raw_after_prefix);
+            if (prefix_len + json.size() + 1 < sizeof(filtered_payload_buf))
+            {
+                memcpy(filtered_payload_buf, raw_after_prefix, prefix_len);
+                memcpy(filtered_payload_buf + prefix_len, json.c_str(), json.size());
+                filtered_payload_buf[prefix_len + json.size()] = '\0';
+                payload_to_use = filtered_payload_buf;
+            }
+        }
+    }
+}
+
+
+	
     // Cache + normal CQ log
     thisclient->has_cq = 1;
     thisclient->cq_ts = now;
 
-    strncpy(thisclient->last_cq, raw_after_prefix, sizeof(thisclient->last_cq) - 1);
+    strncpy(thisclient->last_cq, payload_to_use, sizeof(thisclient->last_cq) - 1);
     thisclient->last_cq[sizeof(thisclient->last_cq) - 1] = '\0';
 
     log_cq_if_enabled(from, thisclient->last_cq);
