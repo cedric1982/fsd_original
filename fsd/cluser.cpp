@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #ifndef WIN32
 	#include <unistd.h>
     #include <strings.h>
@@ -385,6 +386,38 @@ void cluser::execcq(char **array, int count)
    }
 }
 
+static_void log_cq_if_enabled(const char* from_callsign, const char* cq_payload_without_prefix)
+{
+	if (!configman) return;
+
+	configgroup* g = configman->getgroup((char*)"swift");
+	if (!g) return;
+
+	configentry* e_on = g->getentry((char*)"cq_log");
+	if (!e_on || e_on->getint() == 0) return;
+
+	const char* filename = "cq_log.txt";
+	configentry* e_file = g->getentry((char*)"cq_log_file");
+	if (e_file && e_file->getdata() && e_file->getdata()[0] != '\0')
+		filename = e_file->getdata();
+
+	FILE* f = fopen(filename, "a");
+	if (!f) return;
+
+	time_t now = time(NULL);
+	struct tm tmv;
+#ifdef WIN32
+	tmv = *localtime(&now);
+#else
+	localtime_r(&now, &tmv);
+#endif
+	char ts[32];
+	strftime(ts, sizeof(ts), "%Y-%m-%s %H:%M:%S", &tmv);
+
+	fprintf(f, "%s FROM=%s CQ=%s\n", ts, (from_callsign?from_callsign:""), (cq_payload_without_prefix?cq_payload_without_prefix:""));
+	fclose(f);
+}
+
 void cluser::execcq_swift_raw(const char *raw_after_prefix)
 {
     if (!raw_after_prefix || !*raw_after_prefix)
@@ -411,6 +444,8 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
     strncpy(thisclient->last_cq, raw_after_prefix, sizeof(thisclient->last_cq) - 1);
     thisclient->last_cq[sizeof(thisclient->last_cq) - 1] = '\0';
 
+	log_cq_if_enabled(from, thisclient->last_cq)
+	
     clientinterface->sendpacket(NULL, NULL, this, CLIENT_PILOT, -1, CL_CQ, thisclient->last_cq);
 }
 
