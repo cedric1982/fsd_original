@@ -26,6 +26,9 @@ client::client(char *i, server *where, char *cs, int t, int reqrating,
    plan=NULL, positionok=0, altitude=0, simtype=st;
    realname=strdup(real), starttime=alive=mtime();
    frequency=0; transponder=0; groundspeed=0; lat=0; lon=0;
+   has_cq = 0;
+   cq_ts = 0;
+   last_cq[0] = '\0';
 }
 client::~client()
 {
