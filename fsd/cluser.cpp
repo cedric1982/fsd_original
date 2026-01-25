@@ -481,7 +481,7 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
 			if (!thisclient->ground_known || thisclient->on_ground_last != msg_ground_val)
 			{
 				thisclient->ground_known = 1;
-				thsiclient->on_ground_last = msg_ground_val;
+				thisclient->on_ground_last = msg_ground_val;
 				thisclient->ground_last_change = now;
 			}
 		}
@@ -534,6 +534,7 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
 	
     clientinterface->sendpacket(NULL, NULL, this, CLIENT_PILOT, -1, CL_CQ, thisclient->last_cq);
 	}
+}
 }
 void cluser::send_cq_snapshots_to_new_pilot()
 {
