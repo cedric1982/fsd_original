@@ -52,7 +52,7 @@ class client
    time_t gear_last_change; //time(NULL)
    int ground_known;
    int on_ground_last;
-   time_t ground_last_chance;
+   time_t ground_last_change;
    server *location;
    client *next, *prev;
    client(char *, server *, char *, int, int, char *, char *, int);
