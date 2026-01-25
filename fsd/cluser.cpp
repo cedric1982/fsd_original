@@ -489,102 +489,88 @@ static const char* find_json_start_after_acc(const char* payload)
 }
 
 
-static bool strip_config_bool_key(std::string& json, const char* key)
+static bool strip_config_bool_key(std::string& json_str, const char* key)
 {
-    // We try to remove occurrences of: "key":true OR "key":false
-    // inside the "config":{...} object.
     std::string k = "\"";
     k += key;
     k += "\"";
 
-    size_t pos = json.find(k);
+    std::string::size_type pos = json_str.find(k);
     if (pos == std::string::npos) return false;
 
-    // Find ':' after key
-    size_t colon = json.find(':', pos + k.size());
+    std::string::size_type colon = json_str.find(':', pos + k.size());
     if (colon == std::string::npos) return false;
 
-    // Find end of value (expects true/false)
-    size_t val_start = colon + 1;
-    while (val_start < json.size() && (json[val_start] == ' ' || json[val_start] == '\t')) val_start++;
+    std::string::size_type val_start = colon + 1;
+    while (val_start < json_str.size() && (json_str[val_start] == ' ' || json_str[val_start] == '\t')) val_start++;
 
-    bool is_true = json.compare(val_start, 4, "true") == 0;
-    bool is_false = json.compare(val_start, 5, "false") == 0;
+    bool is_true = json_str.compare(val_start, 4, "true") == 0;
+    bool is_false = json_str.compare(val_start, 5, "false") == 0;
     if (!is_true && !is_false) return false;
 
-    size_t val_end = val_start + (is_true ? 4 : 5);
+    std::string::size_type val_end = val_start + (is_true ? 4 : 5);
 
-    // Expand removal range to include surrounding comma correctly
-    // Case A: ..., "key":true, ...
-    // Case B: "key":true, ...
-    // Case C: ..., "key":true
-    size_t erase_start = pos;
-    size_t erase_end = val_end;
+    std::string::size_type erase_start = pos;
+    std::string::size_type erase_end = val_end;
 
-    // include trailing spaces
-    while (erase_end < json.size() && (json[erase_end] == ' ' || json[erase_end] == '\t')) erase_end++;
+    while (erase_end < json_str.size() && (json_str[erase_end] == ' ' || json_str[erase_end] == '\t')) erase_end++;
 
-    // If there's a trailing comma, remove it
-    if (erase_end < json.size() && json[erase_end] == ',')
+    if (erase_end < json_str.size() && json_str[erase_end] == ',')
     {
-        erase_end++; // remove comma
-        while (erase_end < json.size() && (json[erase_end] == ' ' || json[erase_end] == '\t')) erase_end++;
-        json.erase(erase_start, erase_end - erase_start);
+        erase_end++;
+        while (erase_end < json_str.size() && (json_str[erase_end] == ' ' || json_str[erase_end] == '\t')) erase_end++;
+        json_str.erase(erase_start, erase_end - erase_start);
         return true;
     }
 
-    // Otherwise try to remove a leading comma (", " before the key)
-    size_t lead = erase_start;
-    while (lead > 0 && (json[lead - 1] == ' ' || json[lead - 1] == '\t')) lead--;
+    std::string::size_type lead = erase_start;
+    while (lead > 0 && (json_str[lead - 1] == ' ' || json_str[lead - 1] == '\t')) lead--;
 
-    if (lead > 0 && json[lead - 1] == ',')
+    if (lead > 0 && json_str[lead - 1] == ',')
     {
-        size_t comma_pos = lead - 1;
-        // also remove spaces before comma if any
-        size_t back = comma_pos;
-        while (back > 0 && (json[back - 1] == ' ' || json[back - 1] == '\t')) back--;
-        json.erase(back, erase_end - back);
+        std::string::size_type comma_pos = lead - 1;
+        std::string::size_type back = comma_pos;
+        while (back > 0 && (json_str[back - 1] == ' ' || json_str[back - 1] == '\t')) back--;
+        json_str.erase(back, erase_end - back);
         return true;
     }
 
-    // Fallback: remove just the key:value segment
-    json.erase(erase_start, erase_end - erase_start);
+    json_str.erase(erase_start, erase_end - erase_start);
     return true;
 }
 
 
-static bool config_object_is_empty(const std::string& json)
+
+static bool config_object_is_empty(const std::string& json_str)
 {
-    // crude but effective: look for "config":{ ... }
-    size_t cpos = json.find("\"config\"");
+    std::string::size_type cpos = json_str.find("\"config\"");
     if (cpos == std::string::npos) return false;
 
-    size_t brace = json.find('{', cpos);
+    std::string::size_type brace = json_str.find('{', cpos);
     if (brace == std::string::npos) return false;
 
-    // find matching '}' for the config object (simple depth count)
     int depth = 0;
-    for (size_t i = brace; i < json.size(); i++)
+    for (std::string::size_type i = brace; i < json_str.size(); i++)
     {
-        if (json[i] == '{') depth++;
-        else if (json[i] == '}')
+        if (json_str[i] == '{') depth++;
+        else if (json_str[i] == '}')
         {
             depth--;
             if (depth == 0)
             {
-                // check if between brace and i only whitespace/newlines
-                for (size_t j = brace + 1; j < i; j++)
+                for (std::string::size_type j = brace + 1; j < i; j++)
                 {
-                    char ch = json[j];
+                    char ch = json_str[j];
                     if (!(ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'))
-                        return false; // not empty
+                        return false;
                 }
-                return true; // empty
+                return true;
             }
         }
     }
     return false;
 }
+
 
 
 void cluser::execcq_swift_raw(const char *raw_after_prefix)
@@ -639,6 +625,11 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
 
         if (msg_has_ground)
         {
+
+			time_t prev_ground_change = thisclient->ground_last_change;
+			int prev_ground_known = thisclient->ground_known;
+			int prev_on_ground = thisclient->on_ground_last;
+
             // suppress any toggle within debounce window
             if (thisclient->ground_known &&
                 (now - thisclient->ground_last_change) <= debounce_sec &&
@@ -657,17 +648,16 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
                 thisclient->ground_last_change = now;
             }
 			if (landing_protect &&
-    			thisclient->ground_known &&
-    			thisclient->on_ground_last == 1 &&
-    			msg_ground_val == 0 &&
-    			(now - thisclient->ground_last_change) <= landing_protect_sec)
+			    prev_ground_known &&
+			    prev_on_ground == 1 &&
+			    msg_ground_val == 0 &&
+			    (now - prev_ground_change) <= landing_protect_sec)
 			{
 			    log_cq_suppressed_if_enabled("landing_protect_on_ground", from, raw_after_prefix);
 			    strip_ground = true;
+			    // optional: window verlängern
 			    thisclient->ground_last_change = now;
-			}
-
-			
+			}			
         }
     }
 
@@ -721,7 +711,7 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
         }
     }
 
-	const char* payload_to_use = raw_after_prefix;
+const char* payload_to_use = raw_after_prefix;
 char filtered_payload_buf[8192];
 filtered_payload_buf[0] = '\0';
 
@@ -730,29 +720,30 @@ if (strip_gear || strip_ground)
     const char* json_start = find_json_start_after_acc(raw_after_prefix);
     if (json_start)
     {
-        std::string json(json_start);
+        std::string json_str(json_start);
 
-        bool changed = false;
-        if (strip_gear)   changed |= strip_config_bool_key(json, "gear_down");
-        if (strip_ground) changed |= strip_config_bool_key(json, "on_ground");
+			bool changed = false;
+			if (strip_gear)   changed |= strip_config_bool_key(json_str, "gear_down");
+			if (strip_ground) changed |= strip_config_bool_key(json_str, "on_ground");
 
-        if (changed && config_object_is_empty(json))
-        {
-            log_cq_suppressed_if_enabled("merged_to_empty_drop", from, raw_after_prefix);
-            return;
-        }
+			if (changed && config_object_is_empty(json_str))
+			{
+			    log_cq_suppressed_if_enabled("merged_to_empty_drop", from, raw_after_prefix);
+			    return;
+			}
 
-        if (changed)
-        {
-            size_t prefix_len = (size_t)(json_start - raw_after_prefix);
-            if (prefix_len + json.size() + 1 < sizeof(filtered_payload_buf))
-            {
-                memcpy(filtered_payload_buf, raw_after_prefix, prefix_len);
-                memcpy(filtered_payload_buf + prefix_len, json.c_str(), json.size());
-                filtered_payload_buf[prefix_len + json.size()] = '\0';
-                payload_to_use = filtered_payload_buf;
-            }
-        }
+			if (changed)
+			{
+			    size_t prefix_len = (size_t)(json_start - raw_after_prefix);
+ 			   if (prefix_len + json_str.size() + 1 < sizeof(filtered_payload_buf))
+ 			   {
+			        memcpy(filtered_payload_buf, raw_after_prefix, prefix_len);
+ 			       memcpy(filtered_payload_buf + prefix_len, json_str.c_str(), json_str.size());
+ 			       filtered_payload_buf[prefix_len + json_str.size()] = '\0';
+			        payload_to_use = filtered_payload_buf;
+ 			   }
+			}
+
     }
 }
 
