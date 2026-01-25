@@ -491,8 +491,8 @@ void cluser::doparse(char *s)
 	   if (c1 && c2)
 	   {
 		   size_t to_len = (size_t)(c2 - (c1 + 1));
-		   if (to_len == 6 && !strcasecmp(c1 + 1, "server", 6))
-			   to_this_server = 1;
+		   if (to_len == 6 && !strncasecmp(c1 + 1, "server", 6))
+			   to_is_server = 1;
 	   }
 
 	   if (!to_is_server)
