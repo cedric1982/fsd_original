@@ -44,6 +44,9 @@ class client
    double lat,lon;
    int transponder, altitude, groundspeed, frequency, facilitytype;
    int positionok, visualrange, simtype;
+   int has_cq;
+   time_t cq_ts;
+   char last_cq[8192];
    server *location;
    client *next, *prev;
    client(char *, server *, char *, int, int, char *, char *, int);
