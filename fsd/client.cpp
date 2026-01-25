@@ -32,6 +32,9 @@ client::client(char *i, server *where, char *cs, int t, int reqrating,
    gear_known = 0;
    gear_down_last = 0;
    gear_last_change = 0;
+   ground_known = 0;
+   on_ground_last = 0;
+   ground_last_change = 0;
 }
 client::~client()
 {
