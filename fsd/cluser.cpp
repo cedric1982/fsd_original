@@ -426,7 +426,7 @@ static int swift_cfg_int(const char* key, int defval)
     configentry* e = g->getentry((char*)key);
     if (!e) return defval;
     return e->getint();
-
+}
 
 void cluser::execcq_swift_raw(const char *raw_after_prefix)
 {
@@ -495,8 +495,8 @@ void cluser::execcq_swift_raw(const char *raw_after_prefix)
 	log_cq_if_enabled(from, thisclient->last_cq);
 	
     clientinterface->sendpacket(NULL, NULL, this, CLIENT_PILOT, -1, CL_CQ, thisclient->last_cq);
+	}
 }
-
 void cluser::send_cq_snapshots_to_new_pilot()
 {
     if (!thisclient || thisclient->type != CLIENT_PILOT) return;
