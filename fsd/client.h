@@ -50,6 +50,9 @@ class client
    int gear_known;
    int gear_down_last; // 0/1
    time_t gear_last_change; //time(NULL)
+   int ground_known;
+   int on_ground_last;
+   time_t ground_last_chance;
    server *location;
    client *next, *prev;
    client(char *, server *, char *, int, int, char *, char *, int);
